@@ -11,6 +11,7 @@ import type { Action } from './basics/Action.ts';
 import { getVariant } from './variants.js';
 import { State } from './basics/State.js';
 import { logPerformAction } from './tools/log.js';
+import fs from 'fs';
 
 // configuration from environment
 // two separate flags control bot‑only departure behaviour:
@@ -32,7 +33,27 @@ function isBotName(name: string): boolean {
 
 declare type WebSocket = typeof import("undici-types").WebSocket.prototype;
 
+const LOG_AUTO_AVAILABLE = true
+const LOG_AUTO_AVAILABLE_SEND_MSG = false
+
+function logURLDatabase(botname: string, databaseID: number): string {
+	return `https://hanabi.jannisweis.de/logs/${botname}/games/${databaseID}.log`;
+}
+
+function logURLTable(botname: string, tableID: number): string {
+	return `https://hanabi.jannisweis.de/logs/${botname}/tables/${tableID}.log`;
+}
+
+function logDirTables(username: string) {
+	return `../logs/${username}/tables`;
+}
+
+function logDirGames(username: string) {
+	return `../logs/${username}/games`;
+}
+
 export class Bot {
+	username: string
 	game: Game | undefined;
 	settings: Settings = { convention: 'HGroup', level: 1 };
 	last_sender: string | undefined;
@@ -40,6 +61,7 @@ export class Bot {
 
 	self: Self;
 	tableID: number | undefined;
+	databaseID: number | undefined;
 	gameStarted = false;
 	restoredLevel = false;
 
@@ -50,18 +72,81 @@ export class Bot {
 
 	manual: boolean;
 
-	constructor(ws: WebSocket, manual: boolean) {
+	constructor(username: string, ws: WebSocket, manual: boolean) {
+		this.username = username
 		this.ws = ws;
 		this.manual = manual;
 	}
 
-	async handle_action(action: Action) {
-		this.game = this.game.handle_action(action);
 
-		for (const { cmd, arg } of this.game.queued_cmds) 
+
+	async ensure_active_log_directory() {
+		try {
+			const dir = logDirTables(this.username);
+			const path = `${dir}/${this.tableID}.log`;
+			await logger.setFile(dir, path);
+		} catch (error) {
+			logger.error('Failed to set up file logging:', error);
+		}
+	}
+
+	async store_game_log() {
+		if (this.databaseID != undefined && this.databaseID <= 0) {
+			console.log(`Failed to save log file. DatabaseID: ${this.databaseID}`);
+			return;
+		}
+		const tableDir = logDirTables(this.username);
+		const logPath = `${tableDir}/${this.tableID}.log`;
+
+		if (!fs.existsSync(logPath)) {
+			console.log("Log file not found", logPath);
+		}
+
+		const dir = logDirGames(this.username);
+		const path = `${dir}/${this.databaseID}.log`;
+
+		if (fs.existsSync(path)) return;
+
+		await fs.promises.mkdir(dir, { recursive: true });
+		await fs.promises.copyFile(logPath, path);
+		await fs.promises.rm(logPath);
+	}
+
+	store_game_log_sync() {
+		if (this.databaseID != undefined && this.databaseID < 0) {
+			console.log(`Failed to save log file. DatabaseID: ${this.databaseID}`);
+			return;
+		}
+		const tableDir = logDirTables(this.username);
+		const logPath = `${tableDir}/${this.tableID}.log`;
+
+		if (!fs.existsSync(logPath)) {
+			console.log("Log file not found", logPath);
+		}
+
+		const dir = logDirGames(this.username);
+		const path = `${dir}/${this.databaseID}.log`;
+
+		if (fs.existsSync(path)) return;
+
+		fs.mkdirSync(dir, { recursive: true });
+		fs.copyFileSync(logPath, path);
+		fs.rmSync(logPath);
+	}
+
+	async handle_action(action: Action) {
+		let oldGame = this.game;
+		this.game = oldGame.handle_action(action);
+
+		for (const { cmd, arg } of this.game.queued_cmds)
 			this.sendCmd(cmd, { tableID: this.tableID, ...arg });
 
 		this.game.queued_cmds = [];
+
+		if (oldGame.in_progress && !this.game.in_progress) {
+			let tableID = this.tableID;
+			this.sendCmd('getGameInfo1', { tableID });
+		}
 
 		const { state } = this.game;
 
@@ -91,13 +176,16 @@ export class Bot {
 
 			// Received when an action is taken in the current active game.
 			case 'gameAction': {
-				const { action } = data as { tableID: number, action: Action };
+				const { action, databaseID } = data as { tableID: number, databaseID: number, action: Action };
+				this.databaseID = databaseID
 				this.handle_action(action);
 				break;
 			}
 
 			// Received at the beginning of the game, as a list of all actions that have happened so far.
 			case 'gameActionList': {
+				await this.ensure_active_log_directory()
+
 				const { list } = data as { tableID: number, list: Action[] };
 
 				if (this.restoredLevel) {
@@ -165,8 +253,29 @@ export class Bot {
 
 			// Received at the beginning of the game, with information about the game.
 			case 'init': {
-				const { tableID, playerNames, ourPlayerIndex, options } = data as InitData;
+				const { tableID, playerNames, ourPlayerIndex, options, databaseID } = data as InitData;
+				this.databaseID = databaseID;
+
+				console.log("DatabaseID=", databaseID)
+				if (databaseID > 0 && !this.game.in_progress) {
+					logger.info("Received database_id=", databaseID);
+					if (!LOG_AUTO_AVAILABLE) return;
+					try {
+						await this.store_game_log()
+						if (LOG_AUTO_AVAILABLE_SEND_MSG) {
+							this.sendChat(`Saved log file. View it here (database_id=${this.databaseID}): ${logURLDatabase(this.username, this.databaseID)}`);
+						}
+					} catch (error) {
+						logger.error('Failed to copy log file:', error);
+						if (LOG_AUTO_AVAILABLE_SEND_MSG) {
+							this.sendChat("Could not make log file available");
+						}
+					}
+					return;
+				}
+
 				this.tableID = tableID;
+
 				const variant = await getVariant(options.variantName);
 
 				const state = new State(playerNames, ourPlayerIndex, variant, options);
@@ -175,6 +284,12 @@ export class Bot {
 				this.game = new CONVENTIONS[this.settings.convention](state, true, undefined, this.settings.level);
 
 				Utils.globalModify({ variant, playerNames, cache: new Map() });
+
+				if (this.gameStarted) {
+					await this.ensure_active_log_directory()
+					logger.info("Starting game at", new Date().toISOString());
+					logger.info("Players:", playerNames);
+				}
 
 				// Ask the server for more info
 				// We will receive the 'noteListPlayer' next. This is when we can restore the settings.
@@ -187,6 +302,7 @@ export class Bot {
 			case 'left':
 				this.tableID = undefined;
 				this.gameStarted = false;
+				await logger.setFile(null, null);
 				break;
 
 			// Received when a table updates its information.
@@ -257,6 +373,20 @@ export class Bot {
 		}
 	}
 
+	handle_logfile(send_msg: (msg: string) => void) {
+		if (this.game.in_progress) {
+			send_msg(`View the ongoing log here (table_id=${this.tableID}): ${logURLTable(this.username, this.tableID)}`);
+			return
+		}
+		try {
+			this.store_game_log_sync()
+			send_msg(`Saved log file. View it here (database_id=${this.databaseID}): ${logURLDatabase(this.username, this.databaseID)}`);
+		} catch (error) {
+			logger.error('Failed to copy log file:', error);
+			send_msg("Could not make log file available");
+		}
+	}
+
 	handle_chat(data: ChatMessage) {
 		const within_room = data.recipient === '' && data.room.startsWith('table');
 
@@ -265,6 +395,9 @@ export class Bot {
 				this.assignSettings(data, false);
 			else if (data.msg.startsWith('/leaveall'))
 				this.leaveRoom();
+			else if (data.msg.startsWith("/logfile")) {
+				this.handle_logfile((msg) => this.sendChat(msg))
+			}
 
 			return;
 		}
@@ -313,7 +446,7 @@ export class Bot {
 
 			if (table === undefined)
 				this.sendPM(data.who, 'Could not rejoin, as the bot is not a player in any currently open room.');
-			else 
+			else
 				this.sendCmd('tableReattend', { tableID: table.id });
 		}
 		// Kicks the bot from a game (format: /leave)
@@ -357,6 +490,9 @@ export class Bot {
 		}
 		else if (data.msg.startsWith('/version')) {
 			this.sendPM(data.who, `v${BOT_VERSION}`);
+		}
+		else if (data.msg.startsWith("/logfile")) {
+			this.handle_logfile((msg) => this.sendPM(data.who, msg));
 		}
 		else {
 			this.sendPM(data.who, 'Unrecognized command.');

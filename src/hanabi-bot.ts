@@ -9,14 +9,7 @@ import { CUSTOM_PORT, HANABI_HOSTNAME, HANABI_PORT, SSL_ENABLED } from './consta
 /**
  * Logs in to hanab.live and returns the session cookie to authenticate future requests.
  */
-function connect(bot_index = '') {
-	const u_field = `HANABI_USERNAME${bot_index}`, p_field = `HANABI_PASSWORD${bot_index}`;
-
-	if (process.env[u_field] === undefined || process.env[p_field] === undefined)
-		throw new Error(`Missing ${u_field} and ${p_field} environment variables.`);
-
-	const username = encodeURIComponent(process.env[u_field]);
-	const password = encodeURIComponent(process.env[p_field]);
+function connect(username: string, password: string) {
 	const data = `username=${username}&password=${password}&version=bot`;
 
 	const options = {
@@ -65,8 +58,17 @@ async function main() {
 
 	const { index, manual } = Utils.parse_args();
 
+	const bot_index = index || ''
+	const u_field = `HANABI_USERNAME${bot_index}`, p_field = `HANABI_PASSWORD${bot_index}`;
+
+	if (process.env[u_field] === undefined || process.env[p_field] === undefined)
+		throw new Error(`Missing ${u_field} and ${p_field} environment variables.`);
+
+	const username = encodeURIComponent(process.env[u_field]);
+	const password = encodeURIComponent(process.env[p_field]);
+
 	// Connect to server using credentials
-	const cookie = await connect(index);
+	const cookie = await connect(username, password);
 
 	// Establish websocket
 	const protocol = SSL_ENABLED ? 'wss' : 'ws';
@@ -74,7 +76,7 @@ async function main() {
 	const wsUrl = `${protocol}://${HANABI_HOSTNAME}${port}/ws`;
 	const ws = new WebSocket(wsUrl, { headers: { Cookie: cookie } });
 
-	const bot = new Bot(ws, manual !== undefined);
+	const bot = new Bot(username, ws, manual !== undefined);
 	initConsole(bot);
 
 	ws.addEventListener('open', () => console.log('Established websocket connection!'));
