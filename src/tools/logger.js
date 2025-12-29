@@ -1,3 +1,5 @@
+import fs from 'fs';
+
 class Logger {
 	LEVELS = /** @type {const} */ ({
 		DEBUG: 0,
@@ -13,6 +15,16 @@ class Logger {
 	/** @type {{colour: string, args: string[]}[][]} */
 	buffer = [];
 
+	/** @type {string | null} */
+	logFilepathDir = null;
+	/** @type {string | null} */
+	logFilepath = null;
+
+	/** @type {fs.WriteStream | null} */
+	fileStream = null;
+	/** @type {string | null} */
+	fileStreamPath = null;
+
 	constructor() {
 		if (process.env['LOG_LEVEL']) {
 			this.levelOverridden = true;
@@ -22,13 +34,51 @@ class Logger {
 
 	/**
 	 * Sets the lowest level of logs that will be printed to console.
-	 * 
+	 *
 	 * For example, setting the level to WARN will suppress DEBUG and INFO logs, and only print WARN and ERROR logs.
-	 * @param {number} level 
+	 * @param {number} level
 	 */
 	setLevel(level) {
 		if (!this.levelOverridden)
 			this.level = level;
+	}
+
+	async ensureFileStream() {
+		if (this.fileStream && this.fileStreamPath == this.logFilepath) return;
+
+		await fs.promises.mkdir(this.logFilepathDir, { recursive: true });
+		this.fileStreamPath = this.logFilepath;
+		if (fs.existsSync(this.fileStreamPath)) {
+			await fs.promises.truncate(this.fileStreamPath, 0);
+		}
+		this.fileStream = fs.createWriteStream(this.logFilepath, { flags: 'a' });
+	}
+
+	ensureFileStreamSync() {
+		if (this.fileStream && this.fileStreamPath == this.logFilepath) return;
+
+		fs.mkdirSync(this.logFilepathDir, { recursive: true });
+		this.fileStreamPath = this.logFilepath;
+		this.fileStream = fs.createWriteStream(this.logFilepath, { flags: 'a' });
+	}
+
+	/**
+	 * Sets the file to write logs to. If null, stops file logging.
+	 * @param {string | null} dir
+	 * @param {string | null} path
+	 */
+	async setFile(dir, path) {
+		if (dir == this.logFilepathDir && path == this.logFilepath) return;
+		if (this.fileStream) {
+			this.fileStream.end();
+			this.fileStream = null;
+			this.fileStreamPath = null;
+		}
+		this.logFilepathDir = dir;
+		this.logFilepath = path;
+
+		if (this.logFilepathDir == null) return;
+		await this.ensureFileStream();
 	}
 
 	wrapLevel(level, func) {
@@ -58,6 +108,12 @@ class Logger {
 				COLOURS[colour];
 
 			console.log(`\x1b[${colour_code}m%s`, ...args, '\x1b[0m');
+
+			if (this.logFilepath) {
+				this.ensureFileStreamSync();
+				const message = args.map(a => typeof a === 'string' ? a : String(a)).join(' ');
+				this.fileStream.write(message + '\n');
+			}
 		}
 	}
 

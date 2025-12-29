@@ -45,6 +45,7 @@
  * 
  * @typedef InitData
  * @property {number} tableID
+ * @property {number} databaseID
  * @property {string[]} playerNames
  * @property {number} ourPlayerIndex
  * @property {boolean} replay
