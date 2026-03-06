@@ -11,7 +11,7 @@ import type { Action } from './basics/Action.ts';
 import { getVariant } from './variants.js';
 import { State } from './basics/State.js';
 import { logPerformAction } from './tools/log.js';
-import fs from 'fs';
+import { ensure_active_log_directory, LOG_AUTO_AVAILABLE, LOG_AUTO_AVAILABLE_SEND_MSG, logURLDatabase, logURLTable, store_game_log, store_game_log_sync } from './tools/logfile.ts';
 
 // configuration from environment
 // two separate flags control bot‑only departure behaviour:
@@ -32,25 +32,6 @@ function isBotName(name: string): boolean {
 }
 
 declare type WebSocket = typeof import("undici-types").WebSocket.prototype;
-
-const LOG_AUTO_AVAILABLE = true
-const LOG_AUTO_AVAILABLE_SEND_MSG = false
-
-function logURLDatabase(botname: string, databaseID: number): string {
-	return `https://hanabi.jannisweis.de/logs/${botname}/games/${databaseID}.log`;
-}
-
-function logURLTable(botname: string, tableID: number): string {
-	return `https://hanabi.jannisweis.de/logs/${botname}/tables/${tableID}.log`;
-}
-
-function logDirTables(username: string) {
-	return `../logs/${username}/tables`;
-}
-
-function logDirGames(username: string) {
-	return `../logs/${username}/games`;
-}
 
 export class Bot {
 	username: string
@@ -76,62 +57,6 @@ export class Bot {
 		this.username = username
 		this.ws = ws;
 		this.manual = manual;
-	}
-
-
-
-	async ensure_active_log_directory() {
-		try {
-			const dir = logDirTables(this.username);
-			const path = `${dir}/${this.tableID}.log`;
-			await logger.setFile(dir, path);
-		} catch (error) {
-			logger.error('Failed to set up file logging:', error);
-		}
-	}
-
-	async store_game_log() {
-		if (this.databaseID != undefined && this.databaseID <= 0) {
-			console.log(`Failed to save log file. DatabaseID: ${this.databaseID}`);
-			return;
-		}
-		const tableDir = logDirTables(this.username);
-		const logPath = `${tableDir}/${this.tableID}.log`;
-
-		if (!fs.existsSync(logPath)) {
-			console.log("Log file not found", logPath);
-		}
-
-		const dir = logDirGames(this.username);
-		const path = `${dir}/${this.databaseID}.log`;
-
-		if (fs.existsSync(path)) return;
-
-		await fs.promises.mkdir(dir, { recursive: true });
-		await fs.promises.copyFile(logPath, path);
-		await fs.promises.rm(logPath);
-	}
-
-	store_game_log_sync() {
-		if (this.databaseID != undefined && this.databaseID < 0) {
-			console.log(`Failed to save log file. DatabaseID: ${this.databaseID}`);
-			return;
-		}
-		const tableDir = logDirTables(this.username);
-		const logPath = `${tableDir}/${this.tableID}.log`;
-
-		if (!fs.existsSync(logPath)) {
-			console.log("Log file not found", logPath);
-		}
-
-		const dir = logDirGames(this.username);
-		const path = `${dir}/${this.databaseID}.log`;
-
-		if (fs.existsSync(path)) return;
-
-		fs.mkdirSync(dir, { recursive: true });
-		fs.copyFileSync(logPath, path);
-		fs.rmSync(logPath);
 	}
 
 	async handle_action(action: Action) {
@@ -184,7 +109,7 @@ export class Bot {
 
 			// Received at the beginning of the game, as a list of all actions that have happened so far.
 			case 'gameActionList': {
-				await this.ensure_active_log_directory()
+				await ensure_active_log_directory(this);
 
 				const { list } = data as { tableID: number, list: Action[] };
 
@@ -256,12 +181,11 @@ export class Bot {
 				const { tableID, playerNames, ourPlayerIndex, options, databaseID } = data as InitData;
 				this.databaseID = databaseID;
 
-				console.log("DatabaseID=", databaseID)
 				if (databaseID > 0 && !this.game.in_progress) {
 					logger.info("Received database_id=", databaseID);
 					if (!LOG_AUTO_AVAILABLE) return;
 					try {
-						await this.store_game_log()
+						await store_game_log(this)
 						if (LOG_AUTO_AVAILABLE_SEND_MSG) {
 							this.sendChat(`Saved log file. View it here (database_id=${this.databaseID}): ${logURLDatabase(this.username, this.databaseID)}`);
 						}
@@ -286,7 +210,7 @@ export class Bot {
 				Utils.globalModify({ variant, playerNames, cache: new Map() });
 
 				if (this.gameStarted) {
-					await this.ensure_active_log_directory()
+					await ensure_active_log_directory(this)
 					logger.info("Starting game at", new Date().toISOString());
 					logger.info("Players:", playerNames);
 				}
@@ -379,7 +303,7 @@ export class Bot {
 			return
 		}
 		try {
-			this.store_game_log_sync()
+			store_game_log_sync(this);
 			send_msg(`Saved log file. View it here (database_id=${this.databaseID}): ${logURLDatabase(this.username, this.databaseID)}`);
 		} catch (error) {
 			logger.error('Failed to copy log file:', error);
